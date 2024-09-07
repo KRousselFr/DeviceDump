@@ -1,0 +1,10 @@
+.hg/
+*.suo
+*.sdf
+*.opensdf
+*.ipch
+ipch/
+Debug/
+Release/
+*proj.user
+
