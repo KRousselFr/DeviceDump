@@ -8,6 +8,13 @@ namespace DeviceDump
 {
     class Program
     {
+        /* === VARIABLES GLOBALES === */
+
+        private static bool DumpPhysicalDisk = false;
+        private static DriveInfo srcVolume = null;
+        private static string destImageFile = null;
+
+
         /* === MÉTHODES UTILITAIRES (PRIVÉES) === */
 
         /* représentation textuelle d'une taille en octets
@@ -68,8 +75,10 @@ namespace DeviceDump
                     twDest.Write(" ; {0} disponibles.",
                                  FormatDriveSize(di.TotalFreeSpace));
                     twDest.WriteLine();
-                    twDest.WriteLine("- Disque physique : \"{0}\".",
-                                     Kernel32Func.FindPhysicalDrive(di));
+                    uint pdrvNum = Kernel32Func.FindPhysicalDrive(di);
+                    long pdrvSz = Kernel32Func.GetPhysicalDriveSize(pdrvNum);
+                    twDest.WriteLine("- Disque physique no. {0} (taille {1}).",
+                                     pdrvNum, FormatDriveSize(pdrvSz));
                     twDest.WriteLine();
                     twDest.Flush();
                 }
@@ -79,7 +88,7 @@ namespace DeviceDump
         /* affiche un message d'aide sur l'utilisation du programme */
         private static void ShowUsage(TextWriter twDest) {
             twDest.WriteLine();
-            twDest.WriteLine("Usage : {0} <unité> <fich_dest>",
+            twDest.WriteLine("Usage : {0} [<options>] <unité> <fich_dest>",
                     Path.GetFileName(Assembly.GetExecutingAssembly().Location));
             twDest.WriteLine();
             twDest.WriteLine("avec :");
@@ -89,6 +98,9 @@ namespace DeviceDump
             twDest.WriteLine("                l'image du contenu du volume source.");
             twDest.WriteLine("                ATTENTION : si ce fichier existe déjà,");
             twDest.WriteLine("                            il sera écrasé !");
+            twDest.WriteLine("Option(s) possible(s) :");
+            twDest.WriteLine(" -p : Recopie le contenu de tout le disque physique contenant");
+            twDest.WriteLine("      le volume amovible indiqué.");
             twDest.WriteLine();
             twDest.WriteLine("Lancer ce programme sans paramètre affiche la liste des");
             twDest.WriteLine("unités amovibles disponibles sur le système.");
@@ -128,63 +140,110 @@ namespace DeviceDump
         /* === POINT D'ENTRÉE DU PROGRAMME === */
 
         public static void Main(string[] args) {
-            /* si aucun paramètre n'est fourni,
+            /* si aucun argument n'est fourni,
                liste les disques amovibles présents */
             if (args.Length < 1) {
                 ShowRemovableDrives(Console.Out);
                 Environment.Exit(0);
             }
 
-            /* on ne traite que deux paramètres
-               (pas un seul, ni trois ou plus) ! */
-            if (args.Length != 2) {
+            /* on ne traite que deux ou trois arguments
+               (pas un seul, ni quatre ou plus) ! */
+            if ((args.Length < 2) && (args.Length > 3)) {
                 Console.Error.WriteLine(
                         "ERREUR : mauvais nombre de paramètres !");
                 ShowUsage(Console.Error);
                 Environment.Exit(1);
             }
 
-            /* récupère la lettre désignant l'unité voulue */
-            char letter = Char.ToUpper(args[0][0]);
-            if ((letter < 'A') || (letter > 'Z')) {
-                /* Erreur : pas un nom d'unité ! */
-                Console.Error.WriteLine(String.Format(
-                        "ERREUR : mauvais nom d'unité (\"{0}\") !",
-                        args[0]));
-                ShowUsage(Console.Error);
-                Environment.Exit(2);
-            }
-
-            /* recherche les infos sur le drive voulu */
-            string drvName = String.Format(@"{0}:\", letter);
-            bool found = false;
-            DriveInfo srcDrive = null;
-            foreach (DriveInfo di in DriveInfo.GetDrives()) {
-                if (di.Name.Equals(drvName)) {
-                    srcDrive = di;
-                    found = true;
-                    break;
+            /* pour chaque argument donné */
+            foreach (string arg in args) {
+                /* s'agit-il d'une option ? */
+                if ((arg[0] == '-') || (arg[0] == '/')) {
+                    /* si oui, la prend en compte... */
+                    switch (Char.ToLower(arg[1])) {
+                    case 'p':
+                        /* copier le contenu de tout le disque physique */
+                        DumpPhysicalDisk = true;
+                        break;
+                    default:
+                        Console.Error.WriteLine(String.Format(
+                                "ERREUR : Option '{0}' inconnue !",
+                                arg[1]));
+                        ShowUsage(Console.Error);
+                        Environment.Exit(2);
+                        break;
+                    }
+                    /* ... et passe à l'argument suivant */
+                    continue;
                 }
-            }
-            if (!found) {
-                /* drive demandé non trouvé : liste les unités présentes */
-                Console.Error.WriteLine(String.Format(
-                        "ERREUR : unité {0} introuvable !\n",
-                        drvName));
-                ShowRemovableDrives(Console.Error);
-                Environment.Exit(3);
+
+                if (srcVolume == null) {
+                    /* récupère la lettre désignant l'unité voulue */
+                    char letter = Char.ToUpper(arg[0]);
+                    if ((letter < 'A') || (letter > 'Z')) {
+                        /* Erreur : pas un nom d'unité ! */
+                        Console.Error.WriteLine(String.Format(
+                                "ERREUR : mauvais nom d'unité (\"{0}\") !",
+                                arg));
+                        ShowUsage(Console.Error);
+                        Environment.Exit(3);
+                    }
+
+                    /* recherche les infos sur le drive voulu */
+                    string drvName = String.Format(@"{0}:\", letter);
+                    bool found = false;
+                    foreach (DriveInfo di in DriveInfo.GetDrives()) {
+                        if (di.Name.Equals(drvName)) {
+                            srcVolume = di;
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        /* drive demandé non trouvé
+                           => liste les unités présentes */
+                        Console.Error.WriteLine(String.Format(
+                                "ERREUR : unité {0} introuvable !\n",
+                                drvName));
+                        ShowRemovableDrives(Console.Error);
+                        Environment.Exit(3);
+                    }
+                    /* argument suivant */
+                    continue;
+                }
+
+                if (destImageFile == null) {
+                    /* chemin vers le fichier image destination */
+                    destImageFile = Path.GetFullPath(arg.Trim());
+                    /* argument suivant */
+                    continue;
+                }
             }
 
             /* traite l'unité source indiquée */
             try {
-                string destFilePath = Path.GetFullPath(args[1].Trim());
-                Console.Out.WriteLine(String.Format(
-                        "Recopie de {0} dans le fichier image \"{1}\"...",
-                        srcDrive, destFilePath));
-                Console.Out.Flush();
-                Kernel32Func.WriteVolumeIntoFile(srcDrive,
-                                                 destFilePath,
-                                                 ShowProgress);
+                if (DumpPhysicalDisk) {
+                    /* contenu de tout le disque physique */
+                    uint pdrvNum = Kernel32Func.FindPhysicalDrive(srcVolume);
+                    Console.Out.WriteLine(String.Format(
+                            "Recopie du disque physique no. {0}" +
+                            " dans le fichier image \"{1}\"...",
+                            pdrvNum, destImageFile));
+                    Console.Out.Flush();
+                    Kernel32Func.WritePhysicalDiskIntoFile(srcVolume,
+                                                           destImageFile,
+                                                           ShowProgress);
+                } else {
+                    /* contenu du volume uniquement */
+                    Console.Out.WriteLine(String.Format(
+                            "Recopie de {0} dans le fichier image \"{1}\"...",
+                            srcVolume, destImageFile));
+                    Console.Out.Flush();
+                    Kernel32Func.WriteVolumeIntoFile(srcVolume,
+                                                     destImageFile,
+                                                     ShowProgress);
+                }
             } catch (Exception exc) {
                 Console.Error.WriteLine(
                         "\n\n*** SURVENUE D'UNE EXCEPTION ***");

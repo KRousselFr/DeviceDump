@@ -31,7 +31,7 @@ namespace DeviceDump
                 int errNum = Marshal.GetLastWin32Error();
                 throw new Win32Exception(
                         errNum,
-                        "DeviceIOControl(FSCTL_LOCK_VOLUME failed!");
+                        "DeviceIOControl(FSCTL_LOCK_VOLUME) failed!");
             }
         }
 
@@ -49,7 +49,7 @@ namespace DeviceDump
                 int errNum = Marshal.GetLastWin32Error();
                 throw new Win32Exception(
                         errNum,
-                        "DeviceIOControl(FSCTL_UNLOCK_VOLUME failed!");
+                        "DeviceIOControl(FSCTL_UNLOCK_VOLUME) failed!");
             }
         }
 
@@ -79,7 +79,7 @@ namespace DeviceDump
                 int errNum = Marshal.GetLastWin32Error();
                 throw new Win32Exception(
                         errNum,
-                        "DeviceIOControl(FSCTL_DISMOUNT_VOLUME failed!");
+                        "DeviceIOControl(FSCTL_DISMOUNT_VOLUME) failed!");
             }
         }
 
@@ -120,11 +120,31 @@ namespace DeviceDump
                                       (IntPtr)null);
             if (!ok) {
                 int errNum = Marshal.GetLastWin32Error();
-                throw new ApplicationException(
-                    "Could not get physical disk number for volume!",
-                    new Win32Exception(errNum));
+                throw new Win32Exception(
+                        errNum,
+                        "DeviceIOControl(IOCTL_STORAGE_GET_DEVICE_NUMBER) failed!");
             }
             return diskNumber.DeviceNumber;
+        }
+
+        private unsafe static long GetLengthInfo(SafeFileHandle hDevice) {
+            long deviceLength;
+            int ret;
+            bool ok = DeviceIoControl(hDevice,
+                                      IoControlCode.IoctlDiskGetLengthInfo,
+                                      null,
+                                      0,
+                                      &deviceLength,
+                                      sizeof(long),
+                                      out ret,
+                                      (IntPtr)null);
+            if (!ok) {
+                int errNum = Marshal.GetLastWin32Error();
+                throw new Win32Exception(
+                        errNum,
+                        "DeviceIOControl(IOCTL_DIK_GET_LENGTH_INFO) failed!");
+            }
+            return deviceLength;
         }
 
 
@@ -160,6 +180,39 @@ namespace DeviceDump
             }
         }
 
+        private static void DumpDevice(SafeFileHandle hDevice,
+                                       string destFilePath,
+                                       long srcVolSize,
+                                       ReportProgress rpMethod)
+        {
+            long bytesToCopy = srcVolSize;
+            /* ouvre le fichier image destination en écriture */
+            using (FileStream destFile = File.Open(destFilePath,
+                                                   FileMode.Create,
+                                                   FileAccess.Write,
+                                                   FileShare.None))
+            {
+                /* recopie le fichier source sur le volume
+                   destination bloc par bloc */
+                while (bytesToCopy > COPY_BLOCK_SIZE) {
+                    CopyBlockFromVolume(hDevice, destFile, COPY_BLOCK_SIZE);
+                    bytesToCopy -= COPY_BLOCK_SIZE;
+                    if (rpMethod != null) {
+                        rpMethod(100 - (int)(100 * bytesToCopy
+                                                 / srcVolSize));
+                    }
+                }
+                /* traite l'éventuel ultime bloc (tronqué) */
+                if (bytesToCopy > 0) {
+                    CopyBlockFromVolume(hDevice, destFile, (int)bytesToCopy);
+                    bytesToCopy = 0;
+                    rpMethod(100);
+                }
+                destFile.Flush(true);
+            }
+            /* quitter 'using' referme le fichier image destination */
+        }
+
 
         /* === DÉLÉGATIONS === */
 
@@ -173,7 +226,7 @@ namespace DeviceDump
         public delegate void ReportProgress(int percentage);
 
 
-        /* === MÉTHODE PUBLIQUE (STATIQUE) === */
+        /* === MÉTHODES PUBLIQUES (STATIQUES) === */
 
         /// <summary>
         /// Ecrit le contenu du volume voulu  directement sur le
@@ -199,9 +252,8 @@ namespace DeviceDump
                                                string destFilePath,
                                                ReportProgress rpMethod)
         {
-            /* taille en octets de l'image à écrire */
+            /* taille du volume / de la partition à recopier */
             long srcVolSize = volumeInfo.TotalSize;
-            long bytesToCopy = srcVolSize;
             /* ouvre le volume source en lecture */
             string drivePath = String.Format(@"\\.\{0}:",
                                              volumeInfo.Name[0]);
@@ -228,30 +280,11 @@ namespace DeviceDump
                 if (VolumeIsMounted(hVolume)) {
                     DismountVolume(hVolume);
                 }
-                /* ouvre le fichier image destination en écriture */
-                using (FileStream destFile = File.Open(destFilePath,
-                                                       FileMode.Create,
-                                                       FileAccess.Write,
-                                                       FileShare.None))
-                {
-                    /* recopie le fichier source sur le volume
-                       destination bloc par bloc */
-                    while (bytesToCopy > COPY_BLOCK_SIZE) {
-                        CopyBlockFromVolume(hVolume, destFile, COPY_BLOCK_SIZE);
-                        bytesToCopy -= COPY_BLOCK_SIZE;
-                        if (rpMethod != null) {
-                            rpMethod(100 - (int)(100 * bytesToCopy
-                                                     / srcVolSize));
-                        }
-                    }
-                    /* traite l'éventuel ultime bloc (tronqué) */
-                    if (bytesToCopy > 0) {
-                        CopyBlockFromVolume(hVolume, destFile, (int)bytesToCopy);
-                        bytesToCopy = 0;
-                        rpMethod(100);
-                    }
-                    destFile.Flush(true);
-                }   /* quitter 'using' referme le fichier image source */
+                /* effectue la copie proprement dite */
+                DumpDevice(hVolume,
+                           destFilePath,
+                           srcVolSize,
+                           rpMethod);
             } finally {
                 if ((hVolume != null) &&
                     !(hVolume.IsInvalid) &&
@@ -263,11 +296,22 @@ namespace DeviceDump
             }
         }
 
-
-        public static String FindPhysicalDrive(DriveInfo volumeInfo) {
-            /* taille en octets de l'image à écrire */
-            long bytesToCopy = volumeInfo.TotalSize;
-            /* ouvre le volume source en lecture */
+        /// <summary>
+        /// Trouve le numéro de disque physique correspondant au volume
+        /// dont les informations sont passées en paramètre.
+        /// <br/>
+        /// ATTENTION : ne fonctionne que pour les volumes simples,
+        /// contenus sur un unique disque physique (donc pas les
+        /// volumes RAID, etc.) !
+        /// </summary>
+        /// <param name="volumeInfo">
+        /// Informations système décrivant le volume pour lequel on veut
+        /// retrouver le disque physique correspondant.
+        /// </param>
+        /// <returns>
+        /// Le numéro système NT du disque physique contenant le volume.
+        /// </returns>
+        public static uint FindPhysicalDrive(DriveInfo volumeInfo) {
             string drivePath = String.Format(@"\\.\{0}:",
                                              volumeInfo.Name[0]);
             SafeFileHandle hVolume = null;
@@ -288,14 +332,153 @@ namespace DeviceDump
                         new Win32Exception(errNum));
                 }
 
-                uint drvNum = GetDeviceNumber(hVolume);
-                return String.Format(@"\\.\PhysicalDrive{0}", drvNum);
+                return GetDeviceNumber(hVolume);
 
             } finally {
                 if ((hVolume != null) &&
                     !(hVolume.IsInvalid) &&
                     !(hVolume.IsClosed))
                 {
+                    hVolume.Close();   /* appelle l'API W32 CloseHandle() */
+                }
+            }
+        }
+
+        /// <summary>
+        /// Donne la taille totale, en octets, du disque physique dont
+        /// le numéro d'ordre est donné en paramètre.
+        /// </summary>
+        /// <param name="physDrvNum">
+        /// Numéro système NT du disque physique dont on veut la taille.
+        /// </param>
+        /// <returns>
+        /// Taille en octets du disque physique indiqué.
+        /// </returns>
+        public static long GetPhysicalDriveSize(uint physDrvNum) {
+            string physicalDriveRef = String.Format(@"\\.\PhysicalDrive{0}",
+                                                    physDrvNum);
+            SafeFileHandle hDisk = null;
+            try {
+                hDisk = CreateFile(physicalDriveRef,
+                                   DesiredAccess.GenericRead,
+                                   ShareMode.FileShareRead
+                                   | ShareMode.FileShareWrite,
+                                   (IntPtr)null,
+                                   CreationDistribution.OpenExisting,
+                                   FileFlagsAndAttributes.None,
+                                   (IntPtr)null);
+                if (hDisk.IsInvalid) {
+                    int errNum = Marshal.GetLastWin32Error();
+                    throw new ApplicationException(
+                        String.Format("Cannot open \"{0}\" !",
+                                      physicalDriveRef),
+                        new Win32Exception(errNum));
+                }
+
+                return GetLengthInfo(hDisk);
+
+            } finally {
+                if ((hDisk != null) &&
+                    !(hDisk.IsInvalid) &&
+                    !(hDisk.IsClosed))
+                {
+                    hDisk.Close();   /* appelle l'API W32 CloseHandle() */
+                }
+            }
+        }
+
+        /// <summary>
+        /// Ecrit le contenu du disque physique voulu  directement sur le
+        /// fichier image disque indiqué.
+        /// <br/>
+        /// Note : assurez-vous d'avoir suffisamment d'espace disponible
+        /// sur le disque destination.
+        /// </summary>
+        /// <param name="physDrvNum">
+        /// Numéro d'ordre du disque physique dont le contenu doit être recopié.
+        /// </param>
+        /// <param name="destFilePath">
+        /// Chemin vers le fichier image disque destination à créer.
+        /// Si ce fichier existe déjà, il sera écrase !
+        /// </param>
+        /// <param name="rpMethod">
+        /// Méthode "callback" à appeler pour connaître la progression
+        /// de l'opération d'écriture en temps réel.
+        /// Passer <code>null</code> si l'on ne souhaite pas être notifié
+        /// de cette progression.
+        /// </param>
+        public static void WritePhysicalDiskIntoFile(DriveInfo volumeInfo,
+                                                     string destFilePath,
+                                                     ReportProgress rpMethod)
+        {
+            /* ouvre le volume voulu pour le verrouiller et le démonter */
+            string drivePath = String.Format(@"\\.\{0}:",
+                                             volumeInfo.Name[0]);
+            SafeFileHandle hVolume = null;
+            try {
+                hVolume = CreateFile(drivePath,
+                                     DesiredAccess.GenericRead,
+                                     ShareMode.FileShareRead
+                                     | ShareMode.FileShareWrite,
+                                     (IntPtr)null,
+                                     CreationDistribution.OpenExisting,
+                                     FileFlagsAndAttributes.None,
+                                     (IntPtr)null);
+                if (hVolume.IsInvalid) {
+                    int errNum = Marshal.GetLastWin32Error();
+                    throw new ApplicationException(
+                        String.Format("Cannot open volume \"{0}\" !",
+                                      drivePath),
+                        new Win32Exception(errNum));
+                }
+                /* verrouille le volume */
+                LockVolume(hVolume);
+                /* démonte le volume si nécessaire */
+                if (VolumeIsMounted(hVolume)) {
+                    DismountVolume(hVolume);
+                }
+
+                /* retrouve le disque physique correspondant aux volumes */
+                uint physDrvNum = GetDeviceNumber(hVolume);
+                string physicalDriveRef = String.Format(@"\\.\PhysicalDrive{0}",
+                                                        physDrvNum);
+                SafeFileHandle hDisk = null;
+                try {
+                    hDisk = CreateFile(physicalDriveRef,
+                                       DesiredAccess.GenericRead,
+                                       ShareMode.FileShareRead
+                                       | ShareMode.FileShareWrite,
+                                       (IntPtr)null,
+                                       CreationDistribution.OpenExisting,
+                                       FileFlagsAndAttributes.None,
+                                       (IntPtr)null);
+                    if (hDisk.IsInvalid) {
+                        int errNum = Marshal.GetLastWin32Error();
+                        throw new ApplicationException(
+                            String.Format("Cannot open \"{0}\" !",
+                                          physicalDriveRef),
+                            new Win32Exception(errNum));
+                    }
+
+                    /* effectue la copie proprement dite */
+                    DumpDevice(hDisk,
+                               destFilePath,
+                               GetLengthInfo(hDisk),
+                               rpMethod);
+
+                } finally {
+                    if ((hDisk != null) &&
+                        !(hDisk.IsInvalid) &&
+                        !(hDisk.IsClosed)) {
+                        hDisk.Close();   /* appelle l'API W32 CloseHandle() */
+                    }
+                }
+
+            } finally {
+                if ((hVolume != null) &&
+                    !(hVolume.IsInvalid) &&
+                    !(hVolume.IsClosed)) {
+                    UnlockVolume(hVolume);
                     hVolume.Close();   /* appelle l'API W32 CloseHandle() */
                 }
             }
@@ -389,6 +572,7 @@ namespace DeviceDump
         [Flags]
         enum IoControlCode : uint
         {
+            IoctlDiskGetLengthInfo = 0x0007405C,
             FsctlLockVolume      = 0x00090018,
             FsctlUnlockVolume    = 0x0009001C,
             FsctlDismountVolume  = 0x00090020,
