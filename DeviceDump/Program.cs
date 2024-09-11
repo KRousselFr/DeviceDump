@@ -10,7 +10,7 @@ namespace DeviceDump
     {
         /* === VARIABLES GLOBALES === */
 
-        private static bool DumpPhysicalDisk = false;
+        private static bool DumpPhysicalDisk = true;
         private static DriveInfo srcVolume = null;
         private static string destImageFile = null;
 
@@ -99,8 +99,10 @@ namespace DeviceDump
             twDest.WriteLine("                ATTENTION : si ce fichier existe déjà,");
             twDest.WriteLine("                            il sera écrasé !");
             twDest.WriteLine("Option(s) possible(s) :");
-            twDest.WriteLine(" -p : Recopie le contenu de tout le disque physique contenant");
-            twDest.WriteLine("      le volume amovible indiqué.");
+            twDest.WriteLine(" -d : Recopie le contenu de tout le disque physique contenant");
+            twDest.WriteLine("      le volume amovible indiqué (par défaut).");
+            twDest.WriteLine(" -p : recopie seulement le contenu de la partition / du volume");
+            twDest.WriteLine("      indiqué.");
             twDest.WriteLine();
             twDest.WriteLine("Lancer ce programme sans paramètre affiche la liste des");
             twDest.WriteLine("unités amovibles disponibles sur le système.");
@@ -162,9 +164,13 @@ namespace DeviceDump
                 if ((arg[0] == '-') || (arg[0] == '/')) {
                     /* si oui, la prend en compte... */
                     switch (Char.ToLower(arg[1])) {
-                    case 'p':
+                    case 'd':
                         /* copier le contenu de tout le disque physique */
                         DumpPhysicalDisk = true;
+                        break;
+                    case 'p':
+                        /* copier seulement la partition / le volume */
+                        DumpPhysicalDisk = false;
                         break;
                     default:
                         Console.Error.WriteLine(String.Format(

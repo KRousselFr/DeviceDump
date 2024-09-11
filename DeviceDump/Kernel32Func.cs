@@ -192,8 +192,8 @@ namespace DeviceDump
                                                    FileAccess.Write,
                                                    FileShare.None))
             {
-                /* recopie le fichier source sur le volume
-                   destination bloc par bloc */
+                /* recopie le volume / disque source sur
+                   le fichier destination bloc par bloc */
                 while (bytesToCopy > COPY_BLOCK_SIZE) {
                     CopyBlockFromVolume(hDevice, destFile, COPY_BLOCK_SIZE);
                     bytesToCopy -= COPY_BLOCK_SIZE;
